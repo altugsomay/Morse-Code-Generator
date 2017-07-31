@@ -1,0 +1,1067 @@
+;*****************************************************************
+;
+; File Name		: ‘Lab3-uart.asm'
+; Title			: Interrupt-Driven UART sample code
+; Date			: 11/20/2013
+; Version		: 1.1
+; Target MCU	        : ATMega32
+;
+;*****************************************************************
+;okuma
+
+.def   XL_temp = r1                    	; low  part temporary register
+.def   XH_temp = r5                   	; high part temporary register
+
+
+.def   XL_LUT = r3              	; number of LUT-Element (low byte)
+.def   XH_LUT = r4              	; number of LUT-Element (high byte)                        
+
+.def   x_SW = r19                   	; step width
+
+
+.def   temp2 =r18 
+
+.equ     Xtal      = 2000000            ; system clock frequency
+.equ     prescaler = 1                  ; timer1 prescaler
+.equ     N_samples = 128                ; Number of samples in lookup table
+.equ     Fck = Xtal/prescaler           ; timer1 working frequency
+.equ	 SW_500	= 15			; LUT step width
+
+
+
+; define constants
+.equ	BAUD_RATE	=9600
+;.equ	CPU_CLOCK	=3686400
+.equ	CPU_CLOCK	=2000000
+.equ	BAUD_DIV	=(CPU_CLOCK/(16*BAUD_RATE))-1
+
+.equ    TMR0_PRESCL	=0x05	; this is the prescaler setting for CK/1024
+
+.equ	FIFOSIZE	=50		; establish a buffer of size 50
+
+; define register aliases
+.def	SENTCHAR	=r0		; sent character
+.def	RECCHAR		=r2		; received character
+.def	TEMP		=r16	; temporary register
+.def	TEMP1		=r17	; another temporary register
+.def    FIFOHEAD		=r22	; index of beginning of FIFO
+.def    FIFOTAIL		=r23	; index of end of FIFO
+
+
+; data segment
+        .dseg
+fifo:	.byte	FIFOSIZE ; this is the FIFO area of size FIFOSIZE
+
+
+
+
+
+
+
+; code segment
+.cseg
+.org    $000
+	jmp	reset		; $000 HW reset or watchdog
+.org    $012
+    jmp    tim1_ovf                    ; Timer1 overflow Handle
+.org	$01A
+	jmp	REC_INT		; $01A UART Rx complete
+
+tim1_ovf:
+   push   temp  			; Store temporary register
+   in     temp,SREG
+   push   temp                         ; Store status register
+   push   ZL
+   push   ZH                            ; Store Z-Pointer
+   push   r0                            ; Store R0 Register
+
+   mov    XL_temp,XL_LUT			; The current OCR value is stored
+   mov    XH_temp,XH_LUT			; at this position in the LUT
+   add    XL_LUT,x_SW
+   clr    temp                         ; (temp is cleared, but not the carry flag)
+   adc    XH_LUT,temp              	; Refresh pointer for the next sample
+
+
+   ldi    temp,0x7f
+   and    XL_temp,temp                	; module 128 (samples number sine table)
+
+   ldi    ZL,low(sine_tbl*2)		; Program memory is organized as words
+   ldi    ZH,high(sine_tbl*2)		; so, a "label" is a word count 
+   add    ZL,XL_temp
+   clr    temp
+   adc    ZH,temp                      ; Z is a pointer to the correct
+                                        ; sine_tbl value
+
+   lpm					; read the OCR value
+   out     OCR1BL,r0                   	; send the current value to PWM
+
+   pop     r0                           ; Restore R0 Register
+   pop     ZH
+   pop     ZL                           ; Restore Z-Pointer
+   pop     temp
+   out     SREG,temp                   ; Restore SREG
+   pop     temp                        ; Restore temporary register;
+   reti
+
+; begin mloop code
+reset:
+	start:
+    sbi   DDRD,PD4                      ; Set pin PD5 as output
+    ldi   temp,low(RAMEND)
+    out   SPL,temp
+    ldi   temp,high(RAMEND)
+    out   SPH,temp                     ; Initialize Stackpointer
+
+;Initialization of the registers
+    clr   XL_LUT
+    clr   XH_LUT			; Set table pointer to 0x0000
+    ldi   X_SW, SW_500			; set the step width
+
+;enable timer1 interrupt
+    ldi   temp,(1<<TOIE1)
+    out   TIMSK,temp                   ; Enable Timer1_ovf interrupt
+
+;set timer1 PWM mode
+     ldi   temp,(1<<WGM10)+(1<<COM1B1)
+     out   TCCR1A,temp                 ; 8 bit PWM non-inverting (Fck/510)
+     ldi   temp,(1<<CS10)
+     out   TCCR1B,temp                 ; prescaler = 1
+     sei                                ; Enable interrupts
+
+
+	ldi 	TEMP, low(RAMEND)		; initialize stack pointer
+	out	SPL, TEMP
+	ldi 	TEMP, high(RAMEND)
+	out 	SPH, TEMP
+
+   	rcall   clrFIFO				; initialize FIFO
+
+	ldi	TEMP, $FF			; port B all outputs
+	out	DDRB, TEMP
+    	out     PORTB, TEMP			; initially all LEDs off
+    	ldi     TEMP, TMR0_PRESCL		; initialize timer0
+    	out     TCCR0, TEMP			; prescale 1024
+	ldi	TEMP, low(BAUD_DIV)		; set UART baud rate
+	out	UBRRL, TEMP
+	ldi	TEMP, high(BAUD_DIV)		; set UART baud rate
+	out	UBRRH, TEMP
+        
+	sbi     UCSRB, TXEN			; enable serial transmitter
+	sbi     UCSRB, RXEN			; enable serial receiver
+    	sbi     UCSRB, RXCIE			; enable receiver interrupts
+    	sei					; enable interrupts
+	
+mloop:
+ldi r28,0
+out tccr1a, r28
+out tccr1b, r28
+
+rcall   FIFOget			; get the next character from the FIFO
+	brcc	no_inp			;
+	mov	SENTCHAR, RECCHAR
+	rcall   putchar			; transmit character 
+
+no_inp:	
+	rcall   delay			; here we are supposed to be doing the work
+	rcall   delay			; 
+
+mov r21, RECCHAR
+
+cpi r21, 65
+brne Asound2
+rjmp Asound
+Asound2:
+
+cpi r21, 66
+brne bsound2
+rjmp Bsound
+Bsound2:
+
+cpi r21, 67
+brne Csound2
+rjmp Csound
+Csound2:
+
+cpi r21, 68
+brne dsound2
+rjmp Dsound
+Dsound2:
+
+cpi r21, 69
+brne esound2
+rjmp Esound
+Esound2:
+
+cpi r21, 70
+brne fsound2
+rjmp Fsound
+Fsound2:
+
+cpi r21, 71
+brne gsound2
+rjmp Gsound
+Gsound2:
+
+cpi r21, 72
+brne hsound2
+rjmp hsound
+Hsound2:
+
+cpi r21, 73
+brne isound2
+rjmp Isound
+Isound2:
+
+cpi r21, 74
+brne Jsound2
+rjmp Jsound
+Jsound2:
+
+cpi r21, 75
+brne Ksound2
+rjmp Ksound
+Ksound2:
+
+cpi r21, 76
+brne Lsound2
+rjmp Lsound
+Lsound2:
+
+cpi r21, 77
+brne Msound2
+rjmp Msound
+Msound2:
+
+cpi r21, 78
+brne Nsound2
+rjmp Nsound
+Nsound2:
+
+cpi r21, 79
+brne Osound2
+rjmp Osound
+Osound2:
+
+cpi r21, 80
+brne Psound2
+rjmp Psound
+Psound2:
+
+cpi r21, 81
+brne Qsound2
+rjmp Qsound
+Qsound2:
+
+cpi r21, 82
+brne Rsound2
+rjmp Rsound
+Rsound2:
+
+cpi r21, 83
+brne Ssound2
+rjmp Ssound
+Ssound2:
+
+cpi r21, 84
+brne Tsound2
+rjmp Tsound
+Tsound2:
+
+cpi r21, 85
+brne Usound2
+rjmp Usound
+Usound2:
+
+cpi r21, 86
+brne Vsound2
+rjmp Vsound
+Vsound2:
+
+cpi r21, 87
+brne Wsound2
+rjmp Wsound
+Wsound2:
+
+cpi r21, 88
+brne Xsound2
+rjmp Xsound
+Xsound2:
+
+cpi r21, 89
+brne Ysound2
+rjmp Ysound
+Ysound2:
+
+cpi r21, 90
+brne Zsound2
+rjmp Zsound
+Zsound2:
+
+cpi r21, 48
+brne S0sound2
+rjmp S0sound
+S0sound2:
+
+cpi r21, 49
+brne S1sound2
+rjmp S1sound
+S1sound2:
+
+cpi r21, 50
+brne S2sound2
+rjmp S2sound
+S2sound2:
+
+cpi r21, 51
+brne S3sound2
+rjmp S3sound
+S3sound2:
+
+cpi r21, 52
+brne S4sound2
+rjmp S4sound
+S4sound2:
+
+cpi r21, 53
+brne S5sound2
+rjmp S5sound
+S5sound2:
+
+cpi r21, 54
+brne S6sound2
+rjmp S6sound
+S6sound2:
+
+cpi r21, 55
+brne S7sound2
+rjmp S7sound
+S7sound2:
+
+cpi r21, 56
+brne S8sound2
+rjmp S8sound
+S8sound2:
+
+cpi r21, 57
+brne S9sound2
+rjmp S9sound
+S9sound2:
+
+cpi r21, 44
+brne virgulsound2
+rjmp virgulsound
+virgulsound2:
+
+cpi r21, 46
+brne noktasound2
+rjmp noktasound
+noktasound2:
+
+cpi r21, 63
+brne sorusound2
+rjmp sorusound
+sorusound2:
+
+
+cpi r21, 59
+brne nokvirsound2
+rjmp nokvirsound
+nokvirsound2:
+
+cpi r21, 58
+brne ikinoksound2
+rjmp ikinoksound
+ikinoksound2:
+
+cpi r21, 47
+brne slashsound2
+rjmp slashsound
+slashsound2:
+
+cpi r21, 45
+brne tiresound2
+rjmp tiresound
+tiresound2:
+
+cpi r21, 39
+brne kesmesound2
+rjmp kesmesound
+kesmesound2:
+
+cpi r21, 40
+brne parantezsound2
+rjmp parantezsound
+parantezsound2:
+
+cpi r21, 41
+brne parantezsound3
+rjmp parantezsound
+parantezsound3:
+
+cpi r21, 95
+brne alttiresound2
+rjmp alttiresound
+alttiresound2:
+
+
+
+jmp mloop
+
+Asound:
+rcall Short
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+
+Bsound:
+rcall Long
+rcall Short
+rcall Short
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Csound:
+rcall Long
+rcall Short
+rcall Long
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Dsound:
+rcall Long
+rcall Short
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Esound:
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Fsound:
+rcall Short
+rcall Long
+rcall Short
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Gsound:
+rcall Long
+rcall Long
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Hsound:
+rcall Short
+rcall Short
+rcall Short
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Isound:
+rcall Short
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Jsound:
+rcall Short
+rcall Long
+rcall Long
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Ksound:
+rcall Long
+rcall Short
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Lsound:
+rcall Short
+rcall Long
+rcall Short
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Msound:
+rcall Long
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Nsound:
+rcall Long
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Osound:
+rcall Long
+rcall Long
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Psound:
+rcall Short
+rcall Long
+rcall Long
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Qsound:
+rcall Long
+rcall Long
+rcall Short
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Rsound:
+rcall Short
+rcall Short
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Ssound:
+rcall Short
+rcall Long
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Tsound:
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Usound:
+rcall Short
+rcall Short
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Vsound:
+rcall Short
+rcall Short
+rcall Short
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Wsound:
+rcall Short
+rcall Long
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Xsound:
+rcall Long
+rcall Short
+rcall Short
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Ysound:
+rcall Long
+rcall Short
+rcall Long
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Zsound:
+rcall Long
+rcall Long
+rcall Short
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+s1sound:
+rcall Short
+rcall Long
+rcall Long
+rcall Long
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+s2sound:
+rcall Short
+rcall Short
+rcall Long
+rcall Long
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+s3sound:
+rcall Short
+rcall Short
+rcall Short
+rcall Long
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+s4sound:
+rcall Short
+rcall Short
+rcall Short
+rcall Short
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+s5sound:
+rcall Short
+rcall Short
+rcall Short
+rcall Short
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+s6sound:
+rcall Long
+rcall Short
+rcall Short
+rcall Short
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+s7sound:
+rcall Long
+rcall Long
+rcall Short
+rcall Short
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+s8sound:
+rcall Long
+rcall Long
+rcall Long
+rcall Short
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+s9sound:
+rcall Long
+rcall Long
+rcall Long
+rcall Long
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+s0sound:
+rcall Long
+rcall Long
+rcall Long
+rcall Long
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+virgulsound:
+rcall Long
+rcall Long
+rcall Short
+rcall Short
+rcall Long
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+noktasound:
+rcall Short
+rcall Long
+rcall Short
+rcall Long
+rcall Short
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+sorusound:
+rcall Short
+rcall Short
+rcall Long
+rcall Long
+rcall Short
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+nokvirsound:
+rcall Long
+rcall Short
+rcall Long
+rcall Short
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+ikinoksound:
+rcall Long
+rcall Long
+rcall Long
+rcall Short
+rcall Short
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+slashsound:
+rcall Long
+rcall Short
+rcall Short
+rcall Long
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+tiresound:
+rcall Long
+rcall Short
+rcall Short
+rcall Short
+rcall Short
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+kesmesound:
+rcall Short
+rcall Long
+rcall Long
+rcall Long
+rcall Long
+rcall Short
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+parantezsound:
+rcall Long
+rcall Short
+rcall Long
+rcall Long
+rcall Short
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+alttiresound:
+rcall Short
+rcall Short
+rcall Long
+rcall Long
+rcall Short
+rcall Long
+ldi temp,0
+mov recchar,temp
+jmp mloop
+
+Short:
+
+ldi   temp,(1<<WGM10)+(1<<COM1B1)
+out   TCCR1A,temp 
+ldi   temp,(1<<CS10)
+out   TCCR1B,temp
+
+rcall short_delay
+ldi r28,0
+out tccr1a, r28
+out tccr1b, r28
+
+rcall long_delay
+
+ldi r28,0
+out tccr1a, r28
+out tccr1b, r28
+ret
+
+Long:
+
+ldi   temp,(1<<WGM10)+(1<<COM1B1)
+out   TCCR1A,temp 
+ldi   temp,(1<<CS10)
+out   TCCR1B,temp  
+
+rcall long_delay
+ldi r28,0
+out tccr1a, r28
+out tccr1b, r28
+
+rcall long_delay
+
+ldi r28,0
+out tccr1a, r28
+out tccr1b, r28
+ret
+
+
+	
+
+
+; subroutines
+putchar:
+        sbis    UCSRA, UDRE		; loop until USR:UDRE is 1
+        rjmp    putchar
+        out     UDR, SENTCHAR		; write SENTCHAR to transmitter buffer
+        ret
+
+
+; Interrupt Handler
+REC_INT:
+        push    TEMP			; save registers
+        in      TEMP, SREG
+        push	TEMP
+        push	RECCHAR
+        
+        in      RECCHAR, UDR		; read UART receive data
+        mov	TEMP, RECCHAR
+        out     PORTB, TEMP		; display data on LEDs
+        rcall   FIFOput			; place data in the FIFO
+                
+        pop	RECCHAR			; restore registers
+        pop	TEMP
+        out     SREG, TEMP                
+        pop     TEMP
+        reti					; return from interrupt
+
+;FIFO stuff
+clrFIFO:
+        clr     FIFOHEAD		; head = tail -> 0
+        clr     FIFOTAIL
+        ret
+
+FIFOput:
+        push    YH				; save registers
+        push    YL
+        push    TEMP
+        
+        clr     TEMP
+        ldi     YL, low(fifo)	; Y = fifo base
+        ldi     YH, high(fifo)
+        add     YL, FIFOTAIL    ; add offset to the end 
+        adc     YH, TEMP		;
+
+        st      Y, RECCHAR		; store data in FIFO
+        inc     FIFOTAIL		; update current depth
+        cpi     FIFOTAIL, FIFOSIZE
+        brlo    tnowrap
+        clr     FIFOTAIL		; start from begining when full
+tnowrap:
+	pop	TEMP			; restore registers
+        pop     YL
+        pop     YH
+        ret				; return
+
+; function FIFOget
+; if data was available, carry is set
+; if no data was available, carry is clear
+FIFOget:
+        cp      FIFOHEAD, FIFOTAIL	; check if empty
+        brne    N_EMP
+        clc							; clear carry if empty
+        ret
+N_EMP:
+        push    YH					; save registers
+        push    YL
+        clr     RECCHAR
+        ldi     YL, low(fifo)		; Y = FIFO base
+        ldi     YH, high(fifo)
+        add     YL, FIFOhead        ; add offset to get to
+        adc     YH, RECCHAR			;   the beginning (head) of FIFO
+        ld      RECCHAR, Y			; fetch first element in queue
+        inc     FIFOHEAD				; update FIFO head pointer
+        cpi     FIFOHEAD, FIFOSIZE
+        brlo    hnowrap
+        clr     FIFOHEAD            ; wraparound to 0 when needed
+hnowrap:
+        pop     YL                  ; restore registers
+        pop     YH
+        sec                         ; set carry to indicate data
+        ret
+
+; function delay
+; delay 1/16 second
+delay:
+        push    TEMP
+        push    TEMP1
+        in      TEMP1, TCNT0		; get current timer count
+delay1:
+        in      TEMP, TCNT0
+        cp      TEMP1, TEMP
+        breq    delay1			; wait until timer increments
+delay2:
+        in      TEMP, TCNT0
+        cp      TEMP1, TEMP
+        brne    delay2			; wait until original count
+        
+        pop     TEMP1
+        pop     TEMP
+        ret				; return
+
+sine_tbl:
+.db 64,67
+.db 70,73
+.db 76,79
+.db 82,85
+.db 88,91
+.db 94,96
+.db 99,102
+.db 104,106
+.db 109,111
+.db 113,115
+.db 117,118
+.db 120,121
+.db 123,124
+.db 125,126
+.db 126,127
+.db 127,127
+.db 127,127
+.db 127,127
+.db 126,126
+.db 125,124
+.db 123,121
+.db 120,118
+.db 117,115
+.db 113,111
+.db 109,106
+.db 104,102
+.db 99,96
+.db 94,91
+.db 88,85
+.db 82,79
+.db 76,73
+.db 70,67
+.db 64,60
+.db 57,54
+.db 51,48
+.db 45,42
+.db 39,36
+.db 33,31
+.db 28,25
+.db 23,21
+.db 18,16
+.db 14,12
+.db 10,9
+.db 7,6
+.db 4,3
+.db 2,1
+.db 1,0
+.db 0,0
+.db 0,0
+.db 0,0
+.db 1,1
+.db 2,3
+.db 4,6
+.db 7,9
+.db 10,12
+.db 14,16
+.db 18,21
+.db 23,25
+.db 28,31
+.db 33,36
+.db 39,42
+.db 45,48
+.db 51,54
+.db 57,60
+
+
+
+
+;*** Subroutine delay ******************************************************
+longdelay: ldi temp,$FF ; load immediate (1)
+d1: dec temp ; decrement (1)
+brne d1 ; branch on not equal (2/1)
+ret ; return (4)
+;*** Subroutine long delay *************************************************
+long_delay: 
+ser temp2 ; load $FF (1)
+ld1: rcall longdelay ; call (3)
+dec temp2 ; decrement temp2 (1)
+brne ld1 ; branch on not equal (2/1)
+ret ; return (4) 
+
+
+;*** Subroutine delay ******************************************************
+shortdelay: ldi temp,$44 ; load immediate (1)
+d2: dec temp ; decrement (1)
+brne d2 ; branch on not equal (2/1)
+ret ; return (4)
+;*** Subroutine long delay *************************************************
+short_delay: 
+ser temp2 ; load $FF (1)
+ld2: rcall shortdelay ; call (3)
+dec temp2 ; decrement temp2 (1)
+brne ld2 ; branch on not equal (2/1)
+ret ; return (4) 
